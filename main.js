@@ -1,5 +1,11 @@
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.module.js';
 import { Player } from './game/player.js';
+import { createPath } from './game/path.js';
+import { isBuildable } from './game/tower.js';
+
+// Constants
+const TILE_SIZE = 1;
+const GRID_SIZE = 50;
 
 // Scene
 const scene = new THREE.Scene();
@@ -12,7 +18,7 @@ const camera = new THREE.PerspectiveCamera(
     0.1,
     1000
   );
-  camera.position.set(10, 20, 10); // back and above
+  camera.position.set(20, 30, 20); // back and above
   camera.lookAt(0, 0, 0);
 
 // Renderer
@@ -30,14 +36,24 @@ directionalLight.position.set(10, 20, 10);
 scene.add(directionalLight);
 
 // Ground
-const groundGeometry = new THREE.BoxGeometry(50, 1, 50);
+const groundGeometry = new THREE.BoxGeometry(GRID_SIZE, 1, GRID_SIZE);
 const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x228B22 });
 const ground = new THREE.Mesh(groundGeometry, groundMaterial);
 ground.position.y = -0.5; // so top of ground is at y=0
 scene.add(ground);
 
+const {pathTiles, tiles, gridArray} = createPath(scene);
+
+// Extract path coordinates for potential use (e.g., enemy spawning)
+const pathCoords = [];
+for (let y = 0; y < tiles.length; y++) {
+  for (let x = 0; x < tiles[y].length; x++) {
+    if (tiles[y][x] === 1) pathCoords.push({ x, y });
+  }
+}
+//need to add some substance to the map (trees, rocks, castle, etc.)
 // Grid helper (optional)
-const grid = new THREE.GridHelper(50, 50);
+const grid = new THREE.GridHelper(GRID_SIZE, GRID_SIZE);
 scene.add(grid);
 
 // Player
