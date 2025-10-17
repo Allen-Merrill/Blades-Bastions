@@ -59,6 +59,59 @@ function spawnWave(numEnemies) {
 
 spawnWave(5); // Spawn 5 enemies for the wave
 
+// need to add some substance to the map (trees, rocks, castle, etc.)
+function addDecorations(scene, gridArray) {
+  const treeGeometry = new THREE.ConeGeometry(2, 5, 12);
+  const treeMaterial = new THREE.MeshStandardMaterial({ color: 0x006400 });
+  const rockGeometry = new THREE.DodecahedronGeometry(0.8);
+  const rockMaterial = new THREE.MeshStandardMaterial({ color: 0x808080 });
+
+  for (let y = 0; y < gridArray.length; y++) {
+    for (let x = 0; x < gridArray[y].length; x++) {
+      // Skip path tiles
+      if (gridArray[y][x] === 1) continue;
+
+      const rand = Math.random();
+      if (rand < 0.05) {
+        const tree = new THREE.Mesh(treeGeometry, treeMaterial);
+        tree.position.set(x - GRID_SIZE / 2, 0.75, y - GRID_SIZE / 2);
+        scene.add(tree);
+      } else if (rand < 0.08) {
+        const rock = new THREE.Mesh(rockGeometry, rockMaterial);
+        rock.position.set(x - GRID_SIZE / 2, 0.25, y - GRID_SIZE / 2);
+        scene.add(rock);
+      }
+    }
+  }
+}
+addDecorations(scene, gridArray);
+
+// Castle
+const castleGeometry = new THREE.BoxGeometry(3, 3, 3);
+const castleMaterial = new THREE.MeshStandardMaterial({ color: 0x777777 });
+const castle = new THREE.Mesh(castleGeometry, castleMaterial);
+const endTile = pathCoords[pathCoords.length - 1];
+castle.position.set(endTile.x - GRID_SIZE / 2, 1.5, endTile.y - GRID_SIZE / 2);
+scene.add(castle);
+
+// Sun
+const sunGeometry = new THREE.CircleGeometry(1.5, 20, 15);
+const sunMaterial = new THREE.MeshStandardMaterial({ color: 0xFFF200 });
+const sun = new THREE.Mesh(sunGeometry, sunMaterial);
+const eastX = GRID_SIZE - 1;
+const eastZ = Math.floor(GRID_SIZE / 2);
+sun.position.set(
+  eastX - GRID_SIZE / 2, // x
+  20,                    // y
+  eastZ - GRID_SIZE / 2  // z
+);
+scene.add(sun);
+
+  }
+}
+
+spawnWave(5); // Spawn 5 enemies for the wave
+
 // Player
 const player = new Player();
 player.mesh.position.y = 1; // raise above ground
