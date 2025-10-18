@@ -53,7 +53,8 @@ export class MageTower extends Tower {
       const dx = e.x - this.x;
       const dy = e.y - this.y;
       if (Math.sqrt(dx*dx + dy*dy) <= 3) {
-        e.health -= 0.1;
+        const dmg = 0.1 * (this._modifiers && this._modifiers.damage ? this._modifiers.damage : 1);
+        e.health -= dmg;
       }
     });
   }
@@ -80,6 +81,9 @@ export class ArcherTower extends Tower {
         closest = e;
       }
     }
-    if (dist <= 4) closest.health -= 0.2;
+    if (dist <= 4) {
+      const dmg = 0.2 * (this._modifiers && this._modifiers.damage ? this._modifiers.damage : 1);
+      closest.health -= dmg;
+    }
   }
 }

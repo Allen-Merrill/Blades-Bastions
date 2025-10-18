@@ -23,7 +23,9 @@ export class Enemy {
     this.health = this.maxHealth;
     this.maxCoins = options.maxCoins || 5;
     this.coinDrop = Math.floor(Math.random() * (this.maxCoins + 1));
-    this.lootChance = options.lootChance || 0.2; // 20% default chance
+    // Enemies can be explicitly assigned loot via options.carriesLootId
+    this.carriesLootId = options.carriesLootId || null;
+    this.lootChance = options.lootChance || 0.0; // default 0 unless explicitly assigned
     this.hasDroppedLoot = false;
   }
 
@@ -66,10 +68,15 @@ export class Enemy {
     const coins = this.coinDrop;
     // Drop loot (handled in loot.js)
     let loot = null;
-    if (!this.hasDroppedLoot && Math.random() < this.lootChance) {
-      this.hasDroppedLoot = true;
-      // You would call your loot.js logic here, e.g.:
-      // loot = generateLoot(this.mesh.position);
+    if (!this.hasDroppedLoot) {
+      // If this enemy was assigned to carry specific loot, return it
+      if (this.carriesLootId) {
+        this.hasDroppedLoot = true;
+        loot = { id: this.carriesLootId, pos: { x: this.mesh.position.x, y: this.mesh.position.y, z: this.mesh.position.z } };
+      } else if (this.lootChance && Math.random() < this.lootChance) {
+        this.hasDroppedLoot = true;
+        loot = { id: null, pos: { x: this.mesh.position.x, y: this.mesh.position.y, z: this.mesh.position.z } };
+      }
     }
     return { coins, loot };
   }

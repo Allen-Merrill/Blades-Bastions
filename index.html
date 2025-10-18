@@ -7,23 +7,57 @@
 </head>
 <body>
     <div id="ui">
-        💎 Gold: <span id="gold">100</span> | 🧟 Wave: <span id="wave">1</span> | Enemies: <span id="enemiesRemaining">0</span>
+  💎 Gold: <span id="gold">100</span> | 🏰 Castle: <span id="castleHealth">10</span> | 🧟 Wave: <span id="wave">1</span> | Enemies: <span id="enemiesRemaining">0</span>
         <button id="cameraToggle">Toggle Camera (C)</button>
-        <button id="startRound">Start Round</button>
+        <button id="startRound">Start Round (R)</button>
         <div id="waveProgress" style="display:inline-block; vertical-align:middle; margin-left:12px;">
           <div id="waveProgressBar"></div>
-          </div>
+        </div>
 
-          <div id="towerControls">
+        <div id="towerControls">
             <button id="selectHealer">Healer Tower</button>
             <button id="selectMage">Mage Tower</button>
             <button id="selectArcher">Archer Tower</button>
-          </div>
         </div>
+
+  <!-- Upgrades panel (open button removed) -->
+        <div id="upgradesPanel" style="display:none;">
+            <h3>Upgrades</h3>
+            <div id="playerUpgrades">Player: <span id="playerUpgradesList">(none)</span></div>
+            <div id="towerUpgrades">Towers: <div id="towerUpgradesList"></div></div>
+            <button id="resetUpgrades">Reset Upgrades</button>
+        </div>
+
+    <!-- Persistent upgrades panel (always visible) -->
+    <div id="persistentUpgrades">
+      <h4>Applied Upgrades</h4>
+      <div>Player: <span id="persistentPlayerUpgradesList">(none)</span></div>
+      <div style="margin-top:8px;">Towers:</div>
+      <div id="persistentTowersList"></div>
+    </div>
+
+        <!-- Loot apply modal -->
+        <div id="lootModal" style="display:none;">
+            <div id="lootModalContent">
+                <h4 id="lootTitle">Apply Upgrade</h4>
+                <div id="lootTowerList">Choose a tower to apply this upgrade:</div>
+                <button id="lootCancel">Cancel</button>
+            </div>
+        </div>
+    </div> <!-- end #ui -->
+
+    <!-- Crosshair for first-person -->
+    <div id="crosshair" style="display:none;">+</div>
+    <canvas id="gameCanvas"></canvas>
+
+    <!-- Start Menu -->
+    <div id="startMenu">
+      <div id="startMenuContent">
+        <h1>Defend the Castle</h1>
+        <p>Protect your castle from incoming enemies. Upgrades reset each new game.</p>
+        <button id="startGameBtn">Start Game</button>
       </div>
-      <!-- Crosshair for first-person -->
-      <div id="crosshair" style="display:none;">+</div>
-      <canvas id="gameCanvas"></canvas>
+    </div>
     
       <!-- Import map to load Three.js as an ES module -->
       <script type="importmap">
