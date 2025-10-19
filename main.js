@@ -2,8 +2,11 @@ import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.m
 import { Player } from './game/player.js';
 import { createPath } from './game/path.js';
 import { Enemy } from './game/enemy.js';
-import { LOOT_DEFS, Loot, loadPersistentState, savePersistentState } from './game/loot.js';
-import { HealerTower, MageTower, ArcherTower } from './game/tower.js';
+import { LOOT_DEFS, Loot, loadPersistentState, savePersistentState, applyLootToPlayerOrTower, addInventoryEntryFromPickup as addInvFromPickup, reserveInventoryUid as reserveInv, clearReservation as clearInvReservation, removeInventoryByUid, pickRandomLootKey, computeGoldMultiplier } from './game/loot.js';
+import { HealerTower, MageTower, ArcherTower, highlightTowerById as towerHighlight, selectTowerById as towerSelect, clearTowerSelection as towerClear } from './game/tower.js';
+import { GRID_SIZE, TILE_SIZE, PICKUP_RANGE, GHOST_OPACITY_VALID, GHOST_OPACITY_INVALID, RANGE_INDICATOR_COLOR_VALID, RANGE_INDICATOR_COLOR_INVALID, RANGE_INDICATOR_OPACITY, TOWER_DEFAULTS, TOAST_DURATION_MS, TOWER_COSTS, STARTING_GOLD, ATTACK_RANGE, ATTACK_DAMAGE, ATTACK_COOLDOWN } from './game/constants.js';
+import { showToast } from './ui/toast.js';
+// consolidated above
 
 // Tower selection
 let selectedTowerType = null; // "Healer", "Mage", "Archer"
@@ -67,17 +70,31 @@ document.addEventListener("DOMContentLoaded", () => {
 function createGhost(type) {
   removeGhost();
   let geom, color;
+  let range = 0;
   switch ((type || '').toLowerCase()) {
     case 'healer': geom = new THREE.CylinderGeometry(0.5, 0.5, 1, 12); color = 0x00ff00; break;
     case 'mage': geom = new THREE.ConeGeometry(0.5, 1, 12); color = 0x8000ff; break;
     case 'archer': geom = new THREE.BoxGeometry(0.5, 1, 0.5); color = 0xff0000; break;
     default: return;
   }
-  const mat = new THREE.MeshStandardMaterial({ color: color, transparent: true, opacity: 0.55, depthWrite: false });
+  // set range according to tower defaults
+  const tkey = (type || '').toLowerCase();
+  range = (TOWER_DEFAULTS[tkey] && TOWER_DEFAULTS[tkey].range) ? TOWER_DEFAULTS[tkey].range : 0;
+  const mat = new THREE.MeshStandardMaterial({ color: color, transparent: true, opacity: GHOST_OPACITY_VALID, depthWrite: false });
   ghostMesh = new THREE.Mesh(geom, mat);
   ghostMesh.renderOrder = 999;
   ghostMesh.visible = true;
   scene.add(ghostMesh);
+
+  // create a circular range indicator under the ghost
+  const ringGeom = new THREE.CircleGeometry(Math.max(0.2, range), 64);
+  // rotate to lie flat on ground
+  ringGeom.rotateX(-Math.PI / 2);
+  const ringMat = new THREE.MeshBasicMaterial({ color: RANGE_INDICATOR_COLOR_VALID, transparent: true, opacity: RANGE_INDICATOR_OPACITY, depthWrite: false });
+  const rangeMesh = new THREE.Mesh(ringGeom, ringMat);
+  rangeMesh.name = 'ghostRange';
+  rangeMesh.position.set(0, 0.01, 0);
+  ghostMesh.add(rangeMesh);
 }
 
 function removeGhost() {
@@ -124,11 +141,14 @@ function updateGhostFromMouse(clientX, clientY) {
   const valid = isPlacementValid(gx, gy);
   try {
     if (valid) {
-      ghostMesh.material.color.setHex(0x88ff88);
-      ghostMesh.material.opacity = 0.55;
+      ghostMesh.material.color.setHex(RANGE_INDICATOR_COLOR_VALID);
+      ghostMesh.material.opacity = GHOST_OPACITY_VALID;
+      // range indicator greenish
+      try { const r = ghostMesh.getObjectByName('ghostRange'); if (r) r.material.color.setHex(RANGE_INDICATOR_COLOR_VALID); } catch(e){}
     } else {
-      ghostMesh.material.color.setHex(0xff8888);
-      ghostMesh.material.opacity = 0.45;
+      ghostMesh.material.color.setHex(RANGE_INDICATOR_COLOR_INVALID);
+      ghostMesh.material.opacity = GHOST_OPACITY_INVALID;
+      try { const r = ghostMesh.getObjectByName('ghostRange'); if (r) r.material.color.setHex(RANGE_INDICATOR_COLOR_INVALID); } catch(e){}
     }
   } catch (e) {}
 }
@@ -141,10 +161,6 @@ window.addEventListener('mousemove', (ev) => {
   if (selectedTowerType && ghostMesh && usingTopDown) updateGhostFromMouse(ev.clientX, ev.clientY);
 });
 
-
-// Constants
-const TILE_SIZE = 1;
-const GRID_SIZE = 50;
 
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
@@ -179,9 +195,14 @@ createTopDownCamera();
 let fpCamera = null;
 let usingTopDown = true; // default to top-down for between-round view
 
+// last time player attack performed (ms since epoch) for cooldown enforcement
+let lastAttackAt = 0;
+
 function createFirstPersonCamera() {
   fpCamera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
   // initial position will be updated each frame to follow player
+  // ensure the camera is part of the scene graph so children attached to it are rendered
+  try { scene.add(fpCamera); } catch (e) {}
 }
 createFirstPersonCamera();
 // Camera toggle UI and keyboard + start round + crosshair
@@ -189,6 +210,9 @@ let cameraToggleBtn;
 let startRoundBtn;
 let crosshairEl;
 let roundActive = false;
+let gameWon = false;
+let endlessMode = false;
+let paused = false;
 
 function setUsingTopDown(v) {
   // Prevent switching back to top-down during an active round
@@ -256,7 +280,6 @@ const {pathTiles, tiles, grid, pathCoords} = createPath(scene);
 const enemies = [];
 const lootInstances = [];
 let persistentState = loadPersistentState();
-let lootSpawnedThisRound = false;
 let enemiesRemainingEl = null;
 // Castle health
 let castleHealth = 10;
@@ -270,16 +293,58 @@ function updateEnemiesRemaining() {
 function updateCastleHealthUI() {
   if (castleHealthEl) castleHealthEl.textContent = castleHealth.toString();
 }
-function spawnWave(numEnemies) {
-  // Choose a random loot definition for this wave (weighted by rarity could be added)
-  const lootKeys = Object.keys(LOOT_DEFS);
-  const chosenLootKey = lootKeys[Math.floor(Math.random() * lootKeys.length)];
-  const carryIndex = Math.floor(Math.random() * numEnemies);
-  lootSpawnedThisRound = false;
+// Wave scaling config (tunable)
+// Values adjusted to be gentler by default
+const WAVE_CONFIG = {
+  baseEnemies: 3,
+  enemiesPerWave: 0.6, // added per wave (gentler growth)
+  baseHealth: 10,
+  healthScalePerWave: 1.08, // slower health growth
+  baseSpeed: 0.025,
+  speedIncreasePerWave: 0.002, // very small speed increases
+  baseLootChance: 0.02,
+  lootChancePerWave: 0.004,
+  maxEnemies: 120,
+  maxHealth: 500,
+  maxSpeed: 0.12,
+  maxLootChance: 0.5,
+  // Extra powerup every N waves: chance to spawn one additional carrier on those waves
+  extraPowerupEveryN: 5,
+  extraPowerupChance: 0.45 // 45% chance on the milestone wave
+};
 
-  for (let i = 0; i < numEnemies; i++) {
-    const carriesLootId = (i === carryIndex) ? chosenLootKey : null;
-    const enemy = new Enemy(pathCoords, scene, { carriesLootId });
+function spawnWave(numEnemies) {
+  // numEnemies may be used as a small offset from the computed wave size
+  const offset = typeof numEnemies === 'number' ? numEnemies : 0;
+  // Compute final enemy count (ensure it increases with waveNumber)
+  const approxCount = Math.floor(WAVE_CONFIG.baseEnemies + (waveNumber - 1) * WAVE_CONFIG.enemiesPerWave) + offset;
+  const finalCount = Math.max(1, Math.min(WAVE_CONFIG.maxEnemies, approxCount));
+  // compute per-enemy stats
+  const enemyHealth = Math.min(WAVE_CONFIG.baseHealth * Math.pow(WAVE_CONFIG.healthScalePerWave, Math.max(0, waveNumber - 1)), WAVE_CONFIG.maxHealth);
+  const enemySpeed = Math.min(WAVE_CONFIG.baseSpeed + WAVE_CONFIG.speedIncreasePerWave * Math.max(0, waveNumber - 1), WAVE_CONFIG.maxSpeed);
+  const lootChance = Math.min(WAVE_CONFIG.baseLootChance + WAVE_CONFIG.lootChancePerWave * Math.max(0, waveNumber - 1), WAVE_CONFIG.maxLootChance);
+
+  // Choose random loot carriers for this wave. Normally one guaranteed carrier.
+  const chosenLootKey = pickRandomLootKey();
+  const carryIndex = Math.floor(Math.random() * finalCount);
+  // On milestone waves (every extraPowerupEveryN), there is a chance to add an extra carrier
+  const carryIndices = [carryIndex];
+  if (WAVE_CONFIG.extraPowerupEveryN > 0 && waveNumber % WAVE_CONFIG.extraPowerupEveryN === 0) {
+    if (Math.random() < WAVE_CONFIG.extraPowerupChance) {
+      // pick a different index for the extra carrier
+      let extraIdx = Math.floor(Math.random() * finalCount);
+      let attempts = 0;
+      while (extraIdx === carryIndex && attempts < 12) { extraIdx = Math.floor(Math.random() * finalCount); attempts++; }
+      if (extraIdx !== carryIndex) carryIndices.push(extraIdx);
+    }
+  }
+
+  // set currentWaveTotal so UI progress can use correct denominator
+  currentWaveTotal = finalCount;
+
+  for (let i = 0; i < finalCount; i++) {
+    const carriesLootId = carryIndices.includes(i) ? chosenLootKey : null;
+    const enemy = new Enemy(pathCoords, scene, { carriesLootId, maxHealth: enemyHealth, speed: enemySpeed, lootChance });
     // Stagger spawn by offsetting their starting progress
     enemy.progress = -i * 0.5;
     // If a cave spawn position exists, place enemy inside cave initially
@@ -298,6 +363,10 @@ let waveEl = null;
 let waveProgressBar = null;
 
 function startWave(numEnemies) {
+  if (gameWon) {
+    showToast('You have already won the game. Reset to play again.');
+    return;
+  }
   currentWaveTotal = numEnemies;
   updateWaveUI();
   // pulse the enemies counter to draw attention
@@ -638,7 +707,7 @@ const bounds = {
   maxZ: half - 0.5,
 };
 
-const player = new Player(fpCamera, bounds);
+const player = new Player(fpCamera, bounds, ATTACK_DAMAGE);
 player.mesh.position.y = 1; // raise above ground
 scene.add(player.mesh);
 player.enemies = enemies;
@@ -660,8 +729,13 @@ function resetGameState() {
     if (existingOverlay && existingOverlay.parentNode) existingOverlay.parentNode.removeChild(existingOverlay);
   } catch (e) {}
   castleHealth = 10;
-  persistentState = { player: { upgrades: [] }, towers: {} };
+  // Clear player's inventory on reset (user requested)
+  persistentState = { player: { upgrades: [], inventory: [] }, towers: {} };
   savePersistentState(persistentState);
+  // reset gold
+  gold = STARTING_GOLD;
+  if (goldEl) goldEl.textContent = gold.toString();
+  try { refreshTowerButtons(); } catch (e) {}
   // remove enemies and loot from scene
   enemies.forEach(e => { try { scene.remove(e.mesh); } catch (e) {} });
   enemies.length = 0;
@@ -693,6 +767,18 @@ if (startGameBtn) startGameBtn.addEventListener('click', () => startGame());
 // Now that canvas, renderer and player exist, wire up UI elements and events
 cameraToggleBtn = document.getElementById('cameraToggle');
 startRoundBtn = document.getElementById('startRound');
+const endlessCheckbox = document.getElementById('endlessModeCheckbox');
+if (endlessCheckbox) {
+  endlessMode = !!endlessCheckbox.checked;
+  endlessCheckbox.addEventListener('change', (e) => { endlessMode = !!e.target.checked; });
+}
+// show/hide endless indicator if present
+function refreshEndlessIndicator() {
+  const el = document.getElementById('endlessIndicator');
+  if (!el) return;
+  el.style.display = endlessMode ? 'inline' : 'none';
+}
+refreshEndlessIndicator();
 crosshairEl = document.getElementById('crosshair');
 enemiesRemainingEl = document.getElementById('enemiesRemaining');
 // castle health element
@@ -707,17 +793,29 @@ updateCastleHealthUI();
 
 // Gold UI
 const goldEl = document.getElementById('gold');
-let gold = goldEl ? parseInt(goldEl.textContent || '0', 10) : 0;
-
-// Attack configuration
-const ATTACK_RANGE = 1.8; // world units
-const ATTACK_DAMAGE = 4;
-const ATTACK_COOLDOWN = 600; // ms
-let lastAttackAt = 0;
+let gold = goldEl ? parseInt(goldEl.textContent || '0', 10) : STARTING_GOLD;
+if (!goldEl) {
+  // ensure consistent starting value in UI
+  try {
+    const el = document.createElement('div');
+    el.id = 'gold';
+    el.style.display = 'none';
+    el.textContent = STARTING_GOLD.toString();
+    document.body.appendChild(el);
+  } catch (e) {}
+}
 
 function addGold(amount) {
-  gold += amount;
+  // Apply diminishing returns multiplier from Gold Hoard tokens (caps effective multiplier at 2.0)
+  try {
+    const mult = computeGoldMultiplier(persistentState) || 1;
+    const awarded = Math.floor(amount * mult);
+    gold += awarded;
+  } catch (e) {
+    gold += amount;
+  }
   if (goldEl) goldEl.textContent = gold.toString();
+  try { refreshTowerButtons(); } catch (e) {}
 }
 
 function findNearestTowerToPlayer() {
@@ -740,6 +838,9 @@ function ensureTowerId(tower) {
   return tower._id;
 }
 
+// Active inventory uid for the currently-open loot modal (if any)
+let activeModalInventoryUid = null;
+
 // Helper: convert a tower's world position to grid coords for friendly labeling
 function towerWorldToGrid(tower) {
   if (!tower || !tower.mesh) return null;
@@ -749,134 +850,28 @@ function towerWorldToGrid(tower) {
 }
 
 // Highlight a tower briefly in-world by changing material/emissive and scaling
+// Use shared tower helper implementations from `game/tower.js` and keep
+// minimal wrappers here to manage selectedTowerId and camera state.
 function highlightTowerById(tid) {
-  const t = towers.find(x => x._id === tid);
-  if (!t) {
-    console.log(`No tower found with id ${tid}`);
-    return;
-  }
-  if (!t.mesh) return;
-  // preserve original state (scale + material color/emissive)
-  const origScale = t.mesh.scale.clone();
-  const mats = Array.isArray(t.mesh.material) ? t.mesh.material : [t.mesh.material];
-  const origEmissives = mats.map(m => (m && m.emissive ? m.emissive.clone() : null));
-  const origColors = mats.map(m => (m && m.color ? m.color.clone() : null));
-
-  // apply highlight (best-effort)
-  try {
-    t.mesh.scale.set(origScale.x * 1.18, origScale.y * 1.18, origScale.z * 1.18);
-    mats.forEach(m => {
-      if (!m) return;
-      if ('emissive' in m && m.emissive) m.emissive.setHex(0xFFFF66);
-      else if ('color' in m && m.color) m.color.setHex(0xFFFF66);
-    });
-  } catch (e) { /* ignore if material not compatible */ }
-
-  // revert after a short pulse, restoring both emissive and color when available
-  setTimeout(() => {
-    try {
-      if (!t.mesh) return;
-      t.mesh.scale.copy(origScale);
-      mats.forEach((m, idx) => {
-        if (!m) return;
-        // restore emissive if we saved one
-        if (origEmissives[idx] && 'emissive' in m && m.emissive) {
-          m.emissive.copy(origEmissives[idx]);
-        } else if (origColors[idx] && 'color' in m && m.color) {
-          // if emissive wasn't used, restore color
-          m.color.copy(origColors[idx]);
-        }
-      });
-    } catch (e) { /* ignore restore errors */ }
-  }, 1200);
+  try { towerHighlight(towers, tid); } catch (e) { console.warn('highlightTowerById failed', e); }
 }
 
 function selectTowerById(tid) {
-  selectedTowerId = tid;
   // ensure top-down to view selection and highlight persistently
   setUsingTopDown(true);
-  const t = towers.find(x => x._id === tid);
-  if (t && t.mesh) {
-    // store original scale and material colors/emissive so we can restore later
-    try {
-      if (!t._origScale) t._origScale = t.mesh.scale.clone();
-      const mats = Array.isArray(t.mesh.material) ? t.mesh.material : [t.mesh.material];
-      if (!t._origMaterials) {
-        t._origMaterials = mats.map(m => ({ color: m && m.color ? m.color.clone() : null, emissive: m && m.emissive ? m.emissive.clone() : null }));
-      }
-      // small persistent visual indicator while selected (based on original scale)
-      t.mesh.scale.set(t._origScale.x * 1.08, t._origScale.y * 1.08, t._origScale.z * 1.08);
-    } catch (e) { /* ignore */ }
-  }
+  try {
+    selectedTowerId = towerSelect(towers, tid, camera) || tid;
+  } catch (e) { console.warn('selectTowerById failed', e); selectedTowerId = tid; }
 }
 
 function clearTowerSelection() {
-  if (!selectedTowerId) return;
-  const t = towers.find(x => x._id === selectedTowerId);
-  if (t && t.mesh) {
-    // restore original scale and material colors/emissive (best-effort)
-    try {
-      if (t._origScale) t.mesh.scale.copy(t._origScale);
-      const mats = Array.isArray(t.mesh.material) ? t.mesh.material : [t.mesh.material];
-      if (t._origMaterials) {
-        mats.forEach((m, idx) => {
-          const orig = t._origMaterials[idx];
-          if (!m || !orig) return;
-          if (orig.emissive && 'emissive' in m && m.emissive) m.emissive.copy(orig.emissive);
-          if (orig.color && 'color' in m && m.color) m.color.copy(orig.color);
-        });
-      }
-      // cleanup stored originals if desired (keep for repeated focus)
-      // delete t._origScale; delete t._origMaterials;
-    } catch (e) { /* ignore restore errors */ }
-  }
+  try { towerClear(towers, selectedTowerId); } catch (e) { console.warn('clearTowerSelection failed', e); }
   selectedTowerId = null;
   // revert camera to default top-down position (centered)
   createTopDownCamera();
 }
 
-function applyLootToPlayerOrTower(defId) {
-  const def = LOOT_DEFS[defId];
-  if (!def) return;
-  if (def.target === 'player') {
-    persistentState.player = persistentState.player || { upgrades: [] };
-    // stacking check
-    const existing = persistentState.player.upgrades.filter(u => u.id === defId).length;
-    const cap = def.stackCapPlayer || 99;
-    if (existing >= cap) return; // ignore if at cap
-    persistentState.player.upgrades.push({ id: defId, appliedAt: Date.now() });
-    // Apply immediate effect for player (e.g., damage multiplier)
-    if (def.effect.type === 'mul_playerDamage') {
-      player.baseDamage = (player.baseDamage || ATTACK_DAMAGE) * def.effect.value;
-    }
-    if (def.effect.type === 'add_goldPercent') {
-      persistentState.player.goldBonus = (persistentState.player.goldBonus || 0) + def.effect.value;
-    }
-    // show UI feedback
-    if (goldEl) {
-      // simple feedback: console + gold text pulse
-      console.log(`Player acquired ${def.name}`);
-    }
-  } else if (def.target === 'tower_individual') {
-    const tower = findNearestTowerToPlayer();
-    if (!tower) return;
-    const tid = ensureTowerId(tower);
-    const upgrades = persistentState.towers[tid] || [];
-    const sameCount = upgrades.filter(u => u.id === defId).length;
-    if (sameCount >= (def.stackCapPerTower || 1)) return; // at cap for this tower
-    upgrades.push({ id: defId, appliedAt: Date.now() });
-    persistentState.towers[tid] = upgrades;
-    // apply effect to the tower object (best-effort; towers have different APIs)
-    if (!tower._modifiers) tower._modifiers = {};
-    if (def.effect.type === 'mul_damage') {
-      tower._modifiers.damage = (tower._modifiers.damage || 1) * def.effect.value;
-    }
-    if (def.effect.type === 'mul_fireRate') {
-      tower._modifiers.fireRate = (tower._modifiers.fireRate || 1) * def.effect.value;
-    }
-    console.log(`Applied ${def.name} to tower ${tid}`);
-  }
-}
+// applyLootToPlayerOrTower moved to game/loot.js and imported above
 
 // UI wiring for upgrades panel and loot modal
 const upgradesPanel = document.getElementById('upgradesPanel');
@@ -887,18 +882,57 @@ const lootModal = document.getElementById('lootModal');
 const lootModalContent = document.getElementById('lootModalContent');
 const lootTowerList = document.getElementById('lootTowerList');
 const lootCancelBtn = document.getElementById('lootCancel');
+// Inventory UI
+const inventoryPanel = document.getElementById('inventoryPanel');
+const inventoryListEl = document.getElementById('inventoryList');
+const inventoryClearBtn = document.getElementById('inventoryClear');
+// Inventory HUD element (compact) - create if missing
+let inventoryHud = document.getElementById('inventoryHud');
+if (!inventoryHud) {
+  inventoryHud = document.createElement('div');
+  inventoryHud.id = 'inventoryHud';
+  inventoryHud.className = 'inventory-hud';
+  inventoryHud.textContent = 'Inventory: 0';
+  document.body.appendChild(inventoryHud);
+}
+
+// clicking HUD toggles inventory panel visibility (use CSS class)
+if (inventoryHud && inventoryPanel) {
+  inventoryHud.addEventListener('click', () => {
+    try {
+      if (inventoryPanel.classList.contains('open')) {
+        inventoryPanel.classList.remove('open');
+        inventoryPanel.style.display = 'none';
+      } else {
+        inventoryPanel.classList.add('open');
+        inventoryPanel.style.display = 'block';
+      }
+    } catch (e) {}
+  });
+}
+
+// Toast helper
+// showToast imported from ui/toast.js
 
 function refreshUpgradesUI() {
   const p = persistentState.player || { upgrades: [] };
+  // Aggregate player upgrades into counts so they display as 'Name xN' when stacked
   if (p.upgrades && p.upgrades.length > 0) {
-    playerUpgradesList.textContent = p.upgrades.map(u => LOOT_DEFS[u.id].name).join(', ');
+    const counts = {};
+    for (const u of p.upgrades) counts[u.id] = (counts[u.id] || 0) + 1;
+    const parts = Object.keys(counts).map(id => {
+      const name = LOOT_DEFS[id] ? LOOT_DEFS[id].name : id;
+      const cnt = counts[id];
+      return cnt > 1 ? `${name} x${cnt}` : name;
+    });
+    playerUpgradesList.textContent = parts.join(', ');
   } else playerUpgradesList.textContent = '(none)';
 
   // towers
   towerUpgradesList.innerHTML = '';
   if (persistentState.towers) {
     for (const tid of Object.keys(persistentState.towers)) {
-      const ups = persistentState.towers[tid].map(u => LOOT_DEFS[u.id].name).join(', ');
+      const ups = persistentState.towers[tid].map(u => (LOOT_DEFS[u.id] ? LOOT_DEFS[u.id].name : u.id)).join(', ');
       const el = document.createElement('div');
       el.textContent = `${tid}: ${ups}`;
       towerUpgradesList.appendChild(el);
@@ -909,20 +943,47 @@ function refreshUpgradesUI() {
   const persistentPlayerEl = document.getElementById('persistentPlayerUpgradesList');
   const persistentTowersEl = document.getElementById('persistentTowersList');
   if (persistentPlayerEl) {
-    if (p.upgrades && p.upgrades.length > 0) persistentPlayerEl.textContent = p.upgrades.map(u => LOOT_DEFS[u.id].name).join(', ');
-    else persistentPlayerEl.textContent = '(none)';
+    if (p.upgrades && p.upgrades.length > 0) {
+      const counts = {};
+      for (const u of p.upgrades) counts[u.id] = (counts[u.id] || 0) + 1;
+      const parts = Object.keys(counts).map(id => {
+        const name = LOOT_DEFS[id] ? LOOT_DEFS[id].name : id;
+        const cnt = counts[id];
+        return cnt > 1 ? `${name} x${cnt}` : name;
+      });
+      // Show upgrades and the effective gold multiplier (if any)
+      persistentPlayerEl.textContent = parts.join(', ');
+      try {
+        const mult = computeGoldMultiplier(persistentState);
+        if (mult && mult > 1) {
+          const mEl = document.getElementById('goldMultiplierDisplay');
+          if (mEl) mEl.textContent = ` (Gold x${mult.toFixed(2)})`;
+          else {
+            const span = document.createElement('span');
+            span.id = 'goldMultiplierDisplay';
+            span.style.marginLeft = '8px';
+            span.style.fontWeight = 'bold';
+            span.textContent = ` (Gold x${mult.toFixed(2)})`;
+            persistentPlayerEl.appendChild(span);
+          }
+        } else {
+          const mEl = document.getElementById('goldMultiplierDisplay');
+          if (mEl && mEl.parentNode) mEl.parentNode.removeChild(mEl);
+        }
+      } catch (e) {}
+    } else persistentPlayerEl.textContent = '(none)';
   }
   if (persistentTowersEl) {
     persistentTowersEl.innerHTML = '';
     if (persistentState.towers) {
       for (const tid of Object.keys(persistentState.towers)) {
-        const ups = persistentState.towers[tid].map(u => LOOT_DEFS[u.id].name).join(', ');
+        const ups = persistentState.towers[tid].map(u => (LOOT_DEFS[u.id] ? LOOT_DEFS[u.id].name : u.id)).join(', ');
         const row = document.createElement('div');
         // try to find the live tower instance for friendly labeling
         const live = towers.find(tt => tt._id === tid);
         let label = tid;
         if (live) {
-          const pos = towerWorldToGrid(live);
+          const pos = towerWorldToGrid(live) || { x: '?', y: '?' };
           label = `${live.constructor.name} (${pos.x},${pos.y}) [${tid}]`;
         } else {
           label = `${tid} (missing)`;
@@ -959,12 +1020,76 @@ function refreshUpgradesUI() {
       }
     }
   }
+
+  // refresh inventory panel
+  if (inventoryListEl) {
+    inventoryListEl.innerHTML = '';
+    // normalize inventory entries so each has a uid
+    if (persistentState.player && Array.isArray(persistentState.player.inventory)) {
+        persistentState.player.inventory = persistentState.player.inventory.map(it => {
+          if (!it.uid) return Object.assign({}, it, { uid: `${Date.now()}_${Math.random().toString(36).slice(2,8)}` });
+          return it;
+        });
+        savePersistentState(persistentState);
+      }
+    const inv = (persistentState.player && persistentState.player.inventory) ? persistentState.player.inventory : [];
+    if (inv.length === 0) {
+      inventoryListEl.textContent = '(empty)';
+    } else {
+        inv.forEach((item, idx) => {
+        const row = document.createElement('div');
+        row.style.marginBottom = '6px';
+        const name = document.createElement('span');
+        name.textContent = LOOT_DEFS[item.id] ? LOOT_DEFS[item.id].name : item.id;
+        name.style.marginRight = '8px';
+        row.appendChild(name);
+        const btnApply = document.createElement('button');
+        btnApply.textContent = 'Apply';
+        btnApply.addEventListener('click', () => {
+          // open modal but pass the inventory uid so the modal can remove the exact item after apply
+          openLootModalForTowerSelection(item.id, { inventoryUid: item.uid });
+          showToast(`Select a tower to apply: ${LOOT_DEFS[item.id] ? LOOT_DEFS[item.id].name : item.id}`);
+        });
+        row.appendChild(btnApply);
+        const btnDrop = document.createElement('button');
+        btnDrop.textContent = 'Drop';
+        btnDrop.style.marginLeft = '6px';
+        btnDrop.addEventListener('click', () => {
+          // spawn the item at player location
+          const pos = { x: player.mesh.position.x, y: player.mesh.position.y, z: player.mesh.position.z };
+          const li = new Loot(scene, item.id, pos, null);
+          lootInstances.push(li);
+          // remove from inventory
+          if (persistentState.player && Array.isArray(persistentState.player.inventory)) {
+            const inv = persistentState.player.inventory;
+            const findIdx = inv.findIndex(it => it.uid === item.uid);
+            if (findIdx !== -1) {
+              inv.splice(findIdx, 1);
+              savePersistentState(persistentState);
+              refreshUpgradesUI();
+            }
+          }
+          showToast(`Dropped: ${LOOT_DEFS[item.id] ? LOOT_DEFS[item.id].name : item.id}`);
+        });
+        row.appendChild(btnDrop);
+        inventoryListEl.appendChild(row);
+      });
+    }
+  }
+
+  // update compact HUD count
+  try {
+    const count = (persistentState.player && Array.isArray(persistentState.player.inventory)) ? persistentState.player.inventory.length : 0;
+    inventoryHud.textContent = `Inventory: ${count}`;
+  } catch (e) {}
 }
 
 // Upgrades open button removed from UI; panel can still be toggled via code if needed
 
 if (resetUpgradesBtn) resetUpgradesBtn.addEventListener('click', () => {
-  persistentState = { player: { upgrades: [] }, towers: {} };
+  // clearing upgrades but keep inventory
+  const inv = (persistentState && persistentState.player && Array.isArray(persistentState.player.inventory)) ? persistentState.player.inventory : [];
+  persistentState = { player: { upgrades: [], inventory: inv }, towers: {} };
   savePersistentState(persistentState);
   // Reset runtime modifiers
   for (const t of towers) t._modifiers = {};
@@ -973,27 +1098,98 @@ if (resetUpgradesBtn) resetUpgradesBtn.addEventListener('click', () => {
 
 if (lootCancelBtn) lootCancelBtn.addEventListener('click', () => { lootModal.style.display = 'none'; });
 
-function openLootModalForTowerSelection(defId) {
+function openLootModalForTowerSelection(defId, opts) {
   lootTowerList.innerHTML = '';
+  opts = opts || {};
+  // clear previous active modal reservation if any
+  if (activeModalInventoryUid) {
+    clearInvReservation(persistentState, activeModalInventoryUid);
+    activeModalInventoryUid = null;
+  }
+  // show loot title/name at top
+  try {
+    const title = document.createElement('div');
+    title.style.fontWeight = 'bold';
+    title.style.marginBottom = '8px';
+    title.textContent = LOOT_DEFS[defId] ? LOOT_DEFS[defId].name : defId;
+    lootTowerList.appendChild(title);
+  } catch (e) {}
+  // Add Store button so loot can be stored directly from modal if desired
+  try {
+    const storeBtn = document.createElement('button');
+    // If modal was opened from inventory, change label to be clearer
+    storeBtn.textContent = (opts && (typeof opts.inventoryUid === 'string' || typeof opts.inventoryIndex === 'number')) ? 'Keep in Inventory' : 'Store';
+    storeBtn.style.marginLeft = '8px';
+    storeBtn.addEventListener('click', () => {
+      // If modal opened from an inventory item, the item is already in inventory.
+      // Don't add a duplicate; just close and inform the player.
+  if (opts && (typeof opts.inventoryUid === 'string' || typeof opts.inventoryIndex === 'number')) {
+        // clear reservation for this uid now that modal is closing without consuming
+        if (opts.inventoryUid) clearInvReservation(persistentState, opts.inventoryUid);
+        lootModal.style.display = 'none';
+        showToast(`Kept in inventory: ${LOOT_DEFS[defId] ? LOOT_DEFS[defId].name : defId}`);
+        activeModalInventoryUid = null;
+        return;
+      }
+      // Otherwise (pickup flow), store the item into inventory
+      const added = addInvFromPickup(persistentState, defId);
+      lootModal.style.display = 'none';
+      showToast(`Stored: ${LOOT_DEFS[defId] ? LOOT_DEFS[defId].name : defId}`);
+    });
+    lootTowerList.appendChild(storeBtn);
+  } catch (e) {}
   // Create list of towers with buttons to choose
   towers.forEach((t, idx) => {
+    // ensure persistent id present so we can check upgrades
+    try { ensureTowerId(t); } catch (e) {}
+    const tid = t._id;
+    // compute existing count for this defId on this tower
+    let existing = 0;
+    try {
+      if (persistentState.towers && persistentState.towers[tid]) {
+        existing = persistentState.towers[tid].filter(u => u && u.id === defId).length;
+      }
+    } catch (e) { existing = 0; }
+    const def = LOOT_DEFS[defId] || {};
+    const cap = (typeof def.stackCapPerTower === 'number') ? def.stackCapPerTower : 1;
+
     const b = document.createElement('button');
-    b.textContent = `Apply to ${t.constructor.name} (${idx})`;
+    b.textContent = `Apply to ${t.constructor.name} (${existing}/${cap})`;
+    // disable if already at cap
+    if (existing >= cap) {
+      b.disabled = true;
+      b.title = `Max ${def.name || defId} reached (${cap})`;
+    }
     b.addEventListener('click', () => {
-      // ensure tower id
-      ensureTowerId(t);
-      // directly apply to tower id (applyLootToPlayerOrTower will find nearest - but we want specific)
-      // instead, apply modifiers here
-      const def = LOOT_DEFS[defId];
-      const tid = t._id;
-      const upgrades = persistentState.towers[tid] || [];
-      const sameCount = upgrades.filter(u => u.id === defId).length;
-      if (sameCount >= (def.stackCapPerTower || 1)) return;
-      upgrades.push({ id: defId, appliedAt: Date.now() });
-      persistentState.towers[tid] = upgrades;
-      if (!t._modifiers) t._modifiers = {};
-      if (def.effect.type === 'mul_damage') t._modifiers.damage = (t._modifiers.damage || 1) * def.effect.value;
-      if (def.effect.type === 'mul_fireRate') t._modifiers.fireRate = (t._modifiers.fireRate || 1) * def.effect.value;
+      // apply to this specific tower using centralized function
+      const applied = applyLootToPlayerOrTower(persistentState, defId, { player, towers, tower: t, ensureTowerId, findNearestTower: findNearestTowerToPlayer, defaultPlayerBaseDamage: ATTACK_DAMAGE });
+      if (!applied) {
+        showToast('Cannot apply: upgrade at cap or no valid tower.');
+        return;
+      }
+      // success toast: include friendly tower label when possible
+      try {
+        const name = LOOT_DEFS[defId] ? LOOT_DEFS[defId].name : defId;
+        const pos = towerWorldToGrid(t) || { x: '?', y: '?' };
+        showToast(`Applied ${name} to ${t.constructor.name} (${pos.x},${pos.y})`);
+      } catch (e) {}
+      // If this item was from the player's inventory (opts.inventoryUid defined), remove that specific uid
+      if (opts && opts.inventoryUid && persistentState.player && Array.isArray(persistentState.player.inventory)) {
+        const removed = removeInventoryByUid(persistentState, opts.inventoryUid);
+        if (!removed) {
+          console.warn(`Inventory UID ${opts.inventoryUid} not found when applying ${defId}. Inventory unchanged.`);
+          showToast('Applied upgrade, but inventory item not found (no deletion).');
+        }
+        // clear reservation
+        if (opts.inventoryUid) clearInvReservation(persistentState, opts.inventoryUid);
+        activeModalInventoryUid = null;
+      } else {
+        // also support removing any stack copy if present (legacy)
+        if (persistentState.player && Array.isArray(persistentState.player.inventory)) {
+          const invIdx = persistentState.player.inventory.findIndex(it => it.id === defId);
+          if (invIdx !== -1) persistentState.player.inventory.splice(invIdx, 1);
+        }
+      }
       savePersistentState(persistentState);
       lootModal.style.display = 'none';
       refreshUpgradesUI();
@@ -1004,6 +1200,11 @@ function openLootModalForTowerSelection(defId) {
     lootTowerList.textContent = 'No towers placed yet. Place a tower and return to apply.';
   }
   lootModal.style.display = 'flex';
+  // If opened from inventory, mark that inventory uid as reserved to avoid race
+  if (opts && opts.inventoryUid) {
+    activeModalInventoryUid = opts.inventoryUid;
+    reserveInv(persistentState, opts.inventoryUid);
+  }
 }
 
 function attemptAttack() {
@@ -1051,14 +1252,13 @@ function attemptAttack() {
     const coins = result.coins || 0;
     addGold(coins);
     // If this enemy dropped loot, spawn the pickup (only one per round allowed)
-    if (result.loot && !lootSpawnedThisRound) {
+    if (result.loot) {
       const lootId = result.loot.id || null;
       const pos = result.loot.pos || { x: nearest.enemy.mesh.position.x, y: nearest.enemy.mesh.position.y, z: nearest.enemy.mesh.position.z };
       // If lootId is null, pick random from LOOT_DEFS
-      const finalLootId = lootId || Object.keys(LOOT_DEFS)[Math.floor(Math.random() * Object.keys(LOOT_DEFS).length)];
+  const finalLootId = lootId || pickRandomLootKey();
       const li = new Loot(scene, finalLootId, pos, null);
       lootInstances.push(li);
-      lootSpawnedThisRound = true;
     }
     scene.remove(nearest.enemy.mesh);
     const idx = enemies.indexOf(nearest.enemy);
@@ -1071,7 +1271,16 @@ function attemptAttack() {
 // Mouse and keyboard attack handlers
 if (canvas) {
   canvas.addEventListener('mousedown', (e) => {
-    if (e.button === 0) attemptAttack();
+    if (e.button === 0) {
+      // In first-person, perform player's melee swing; in top-down fall back to attemptAttack
+      try {
+        if (!usingTopDown && typeof player !== 'undefined' && player && typeof player.startSwing === 'function') {
+          player.startSwing();
+          return;
+        }
+      } catch (err) {}
+      attemptAttack();
+    }
   });
 }
 document.addEventListener('keydown', (e) => {
@@ -1083,6 +1292,10 @@ document.addEventListener('keydown', (e) => {
 
 if (cameraToggleBtn) cameraToggleBtn.addEventListener('click', () => setUsingTopDown(!usingTopDown));
 if (startRoundBtn) startRoundBtn.addEventListener('click', () => {
+  if (gameWon) {
+    showToast('You already won — reset to play again.');
+    return;
+  }
   if (roundActive) return;
   roundActive = true;
   setUsingTopDown(false);
@@ -1091,12 +1304,50 @@ if (startRoundBtn) startRoundBtn.addEventListener('click', () => {
 // Keyboard shortcut to start round: Enter or R
 document.addEventListener('keydown', (e) => {
   if ((e.key === 'Enter' || e.key.toLowerCase() === 'r') && !roundActive) {
+    if (gameWon) {
+      showToast('You already won — reset to play again.');
+      return;
+    }
     roundActive = true;
     setUsingTopDown(false);
     startWave(6);
   }
 });
 document.addEventListener('keydown', (e) => { if (e.key.toLowerCase() === 'c') setUsingTopDown(!usingTopDown); });
+
+// Keyboard: Tab toggles pause (prevent default focus change)
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    paused = !paused;
+    const pauseOverlay = document.getElementById('pauseOverlay');
+    if (paused) {
+      if (pauseOverlay) pauseOverlay.style.display = 'flex';
+    } else {
+      if (pauseOverlay) pauseOverlay.style.display = 'none';
+    }
+  }
+});
+
+// Pause UI wiring
+const pauseBtn = document.getElementById('pauseBtn');
+const pauseOverlay = document.getElementById('pauseOverlay');
+const resumeBtn = document.getElementById('resumeBtn');
+const endGameBtn = document.getElementById('endGameBtn');
+if (pauseBtn) pauseBtn.addEventListener('click', () => {
+  paused = true;
+  if (pauseOverlay) pauseOverlay.style.display = 'flex';
+});
+if (resumeBtn) resumeBtn.addEventListener('click', () => {
+  paused = false;
+  if (pauseOverlay) pauseOverlay.style.display = 'none';
+});
+if (endGameBtn) endGameBtn.addEventListener('click', () => {
+  paused = false;
+  if (pauseOverlay) pauseOverlay.style.display = 'none';
+  if (startMenu) startMenu.style.display = 'flex';
+  resetGameState();
+});
 
 function handlePlayerMovement() {
   // If in first-person, move relative to camera yaw
@@ -1146,6 +1397,13 @@ function buildTower(type, x, y) {
   if (towersBuiltThisRound >= towerLimitPerRound) return; // limit per round
   type = type.toLowerCase(); // normalize
 
+  // Check cost
+  const cost = TOWER_COSTS[type] || 0;
+  if (typeof gold !== 'number' || gold < cost) {
+    showToast(`Not enough gold to build ${type}. Need ${cost}g.`);
+    return;
+  }
+
   let tower;
   switch(type) {
     case "healer": tower = new HealerTower(x, y, scene); break;
@@ -1154,8 +1412,15 @@ function buildTower(type, x, y) {
     default: return;
   }
 
+  // Deduct gold and add tower
+  gold -= cost;
+  if (goldEl) goldEl.textContent = gold.toString();
   towers.push(tower);
   towersBuiltThisRound++;
+  showToast(`Built ${type} for ${cost}g`);
+  // refresh tower button states
+  try { refreshTowerButtons(); } catch (e) {}
+  return tower;
 }
 
 function getGridCoordsFromClick(mouseX, mouseY) {
@@ -1205,17 +1470,8 @@ window.addEventListener("click", (event) => {
     return;
     }
 
-    let tower;
-    if (selectedTowerType === "Healer") {
-      tower = new HealerTower(x, y, scene);
-    } else if (selectedTowerType === "Mage") {
-      tower = new MageTower(x, y, scene);
-    } else if (selectedTowerType === "Archer") {
-      tower = new ArcherTower(x, y, scene);
-    }
-
-    towers.push(tower);
-    towersBuiltThisRound++; // increment here!
+    // Centralized build (handles cost and UI)
+    const placed = buildTower(selectedTowerType, x, y);
   // reset after placing
   selectedTowerType = null;
   // clear selected button state
@@ -1225,7 +1481,7 @@ window.addEventListener("click", (event) => {
   [healerBtn, mageBtn, archerBtn].forEach(b => { if (b) b.classList.remove('tower-btn-selected'); });
   // remove ghost if present
   removeGhost();
-      console.log(`${tower.constructor.name} placed at (${x},${y})`);
+    if (placed) console.log(`${placed.constructor.name} placed at (${x},${y})`);
   }
 });
 
@@ -1236,12 +1492,16 @@ const clock = new THREE.Clock();
 // Animate
 function animate() {
   requestAnimationFrame(animate);
+  // If paused, skip game updates but continue rendering so overlays stay visible
+  if (paused) {
+    const activeCam = usingTopDown ? camera : fpCamera;
+    renderer.render(scene, activeCam);
+    return;
+  }
   handlePlayerMovement();
   const delta = clock.getDelta(); // seconds since last frame
 
   player.update(delta);
-
-  renderer.render(scene, camera);
 
   // Update first-person camera to follow player if active
   if (fpCamera && player) {
@@ -1321,7 +1581,7 @@ function animate() {
   }
 
   // Update loot instances and check for player pickup
-  const pickupRange = 1.2;
+  const pickupRange = PICKUP_RANGE;
   for (let i = lootInstances.length - 1; i >= 0; i--) {
     const li = lootInstances[i];
     li.update(0.016); // approx frame delta
@@ -1331,19 +1591,49 @@ function animate() {
     if (dist <= pickupRange) {
       // apply loot or open selection modal for tower-targeted upgrades
       const def = LOOT_DEFS[li.defId];
-      if (def && def.target === 'tower_individual') {
-        // open modal to let player choose tower; store a temporary ref
-        window.__pendingLoot = { defId: li.defId };
-        openLootModalForTowerSelection(li.defId);
-        // remove the pickup visually and from array
-        li.dispose();
-        lootInstances.splice(i, 1);
+        if (def) {
+        if (def.target === 'tower_individual') {
+          // Store the picked item into inventory immediately (so canceling later won't lose it)
+          const entry = addInvFromPickup(persistentState, li.defId);
+          // Inform the player that the item was stored on pickup
+          showToast(`Stored: ${LOOT_DEFS[li.defId] ? LOOT_DEFS[li.defId].name : li.defId}`);
+          // open modal to let player choose tower to apply this stored item
+          openLootModalForTowerSelection(li.defId, { inventoryUid: entry.uid });
+          // remove the pickup visually and from array
+          li.dispose();
+          lootInstances.splice(i, 1);
+        } else if (def.target === 'player') {
+          // Apply player-targeted loot immediately (centralized)
+          const applied = applyLootToPlayerOrTower(persistentState, li.defId, { player, towers, ensureTowerId, findNearestTower: findNearestTowerToPlayer, defaultPlayerBaseDamage: ATTACK_DAMAGE });
+          if (applied) {
+            savePersistentState(persistentState);
+            try { showToast(`Applied: ${LOOT_DEFS[li.defId] ? LOOT_DEFS[li.defId].name : li.defId}`); } catch (e) {}
+          } else {
+            try { showToast(`Could not apply: ${LOOT_DEFS[li.defId] ? LOOT_DEFS[li.defId].name : li.defId}`); } catch (e) {}
+          }
+          // remove pickup visual
+          li.dispose();
+          lootInstances.splice(i, 1);
+          refreshUpgradesUI();
+        } else {
+          // For other loot, store in inventory for later
+          const entry = addInvFromPickup(persistentState, li.defId);
+          // notify player
+          showToast(`Stored: ${LOOT_DEFS[li.defId] ? LOOT_DEFS[li.defId].name : li.defId}`);
+          // remove pickup visual
+          li.dispose();
+          lootInstances.splice(i, 1);
+          refreshUpgradesUI();
+        }
       } else {
-        applyLootToPlayerOrTower(li.defId);
-        li.dispose();
-        lootInstances.splice(i, 1);
-        savePersistentState(persistentState);
-        refreshUpgradesUI();
+        // Unknown loot id: store defensively
+          addInvFromPickup(persistentState, li.defId);
+          // notify player
+          showToast(`Stored: ${li.defId}`);
+          showToast(`Stored: ${li.defId}`);
+          li.dispose();
+          lootInstances.splice(i, 1);
+          refreshUpgradesUI();
       }
     }
   }
@@ -1358,6 +1648,46 @@ function animate() {
     updateWaveUI();
     setUsingTopDown(true);
     towersBuiltThisRound = 0;
+    // Check win condition: beating round 20 (unless Endless Mode is enabled)
+    if (waveNumber > 20 && !gameWon && !endlessMode) {
+      gameWon = true;
+      // show a win overlay similar to game over
+      if (!document.getElementById('gameWinOverlay')) {
+        const overlay = document.createElement('div');
+        overlay.id = 'gameWinOverlay';
+        overlay.style.position = 'fixed';
+        overlay.style.left = '0';
+        overlay.style.top = '0';
+        overlay.style.right = '0';
+        overlay.style.bottom = '0';
+        overlay.style.display = 'flex';
+        overlay.style.alignItems = 'center';
+        overlay.style.justifyContent = 'center';
+        overlay.style.background = 'rgba(0,0,0,0.8)';
+        overlay.style.color = 'white';
+        overlay.style.fontSize = '32px';
+        overlay.style.zIndex = 9999;
+        const box = document.createElement('div');
+        box.style.textAlign = 'center';
+        box.style.padding = '24px';
+        box.style.background = '#111';
+        box.style.borderRadius = '10px';
+        box.textContent = 'Victory! You cleared Round 20.';
+        const btn = document.createElement('button');
+        btn.textContent = 'Return to Menu';
+        btn.style.display = 'block';
+        btn.style.margin = '12px auto 0';
+        btn.addEventListener('click', () => {
+          try { const ov = document.getElementById('gameWinOverlay'); if (ov && ov.parentNode) ov.parentNode.removeChild(ov); } catch (e) {}
+          if (startMenu) startMenu.style.display = 'flex';
+          resetGameState();
+          gameWon = false;
+        });
+        box.appendChild(btn);
+        overlay.appendChild(box);
+        document.body.appendChild(overlay);
+      }
+    }
   }
 
   // Choose the active camera each frame
@@ -1371,7 +1701,30 @@ towers.forEach(tower => {
   if (tower instanceof HealerTower) tower.update(player, currentTime);
   else tower.update(enemies, currentTime);
 });
-
+// Process any enemies killed by towers during their update pass
+for (let i = enemies.length - 1; i >= 0; i--) {
+  const e = enemies[i];
+  if (!e) continue;
+  // If the enemy has a stored death result or marked dead, process removal
+  const death = e._deathResult || (e.dead ? e.die && e.die() : null);
+  if (death) {
+    // Give coins
+    const coins = death.coins || 0;
+    if (coins) addGold(coins);
+    // spawn loot if present and none spawned this round
+    if (death.loot) {
+      const finalLootId = death.loot.id || pickRandomLootKey();
+      const pos = death.loot.pos || { x: e.mesh.position.x, y: e.mesh.position.y, z: e.mesh.position.z };
+      const li = new Loot(scene, finalLootId, pos, null);
+      lootInstances.push(li);
+    }
+    // remove visual
+    try { scene.remove(e.mesh); } catch (err) {}
+    enemies.splice(i, 1);
+    updateEnemiesRemaining();
+    updateWaveUI();
+  }
+}
 }
 animate();
 
@@ -1386,3 +1739,24 @@ window.addEventListener('resize', () => {
   }
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
+
+// Update UI labels on tower buttons to include cost and disable if unaffordable
+function refreshTowerButtons() {
+  const healerBtn = document.getElementById('selectHealer');
+  const mageBtn = document.getElementById('selectMage');
+  const archerBtn = document.getElementById('selectArcher');
+  if (healerBtn) {
+    healerBtn.textContent = `Healer Tower (${TOWER_COSTS.healer}g)`;
+    healerBtn.disabled = gold < TOWER_COSTS.healer;
+  }
+  if (mageBtn) {
+    mageBtn.textContent = `Mage Tower (${TOWER_COSTS.mage}g)`;
+    mageBtn.disabled = gold < TOWER_COSTS.mage;
+  }
+  if (archerBtn) {
+    archerBtn.textContent = `Archer Tower (${TOWER_COSTS.archer}g)`;
+    archerBtn.disabled = gold < TOWER_COSTS.archer;
+  }
+}
+// initial refresh
+refreshTowerButtons();

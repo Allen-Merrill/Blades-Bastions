@@ -19,15 +19,17 @@ export class Enemy {
     this.progress = 0; // Progress between steps
 
     // Enemy stats
-    this.maxHealth = options.maxHealth || 10;
-    this.health = this.maxHealth;
-    this.maxCoins = options.maxCoins || 5;
+  this.maxHealth = options.maxHealth || 10;
+  this.health = this.maxHealth;
+  this.maxCoins = options.maxCoins || 5;
     this.coinDrop = Math.floor(Math.random() * (this.maxCoins + 1));
     // Enemies can be explicitly assigned loot via options.carriesLootId
     this.carriesLootId = options.carriesLootId || null;
-    this.lootChance = options.lootChance || 0.0; // default 0 unless explicitly assigned
+  this.lootChance = typeof options.lootChance === 'number' ? options.lootChance : 0.0; // default 0 unless explicitly assigned
     this.hasDroppedLoot = false;
     this.dead = false;
+  // Allow speed override
+  if (typeof options.speed === 'number') this.speed = options.speed;
 
     // Health bar background
     const barBgGeo = new THREE.PlaneGeometry(0.8, 0.1);
