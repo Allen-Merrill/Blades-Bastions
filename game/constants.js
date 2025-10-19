@@ -14,13 +14,15 @@ export const TOAST_DURATION_MS = 1600;
 // Ghost/visuals
 export const GHOST_OPACITY_VALID = 0.55;
 export const GHOST_OPACITY_INVALID = 0.45;
-export const RANGE_INDICATOR_COLOR_VALID = 0x88ff88;
+// Darker green for better visibility and contrast
+export const RANGE_INDICATOR_COLOR_VALID = 0x2e8b57;
 export const RANGE_INDICATOR_COLOR_INVALID = 0xff8888;
-export const RANGE_INDICATOR_OPACITY = 0.18;
+// Increased so the placement range circle is more visible when previewing towers
+export const RANGE_INDICATOR_OPACITY = 0.35;
 
 // Tower defaults
 export const TOWER_DEFAULTS = {
-  healer: { range: 10, color: 0x00ff00, baseCooldown: 1.0 },
+  healer: { range: 10, color: 0x2e8b57, baseCooldown: 1.0 },
   mage:   { range: 10, color: 0x8000ff, baseCooldown: 1.0 },
   archer: { range: 20, color: 0xff0000, baseCooldown: 1.0 },
 };
