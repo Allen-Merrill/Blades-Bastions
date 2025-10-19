@@ -74,7 +74,8 @@ export class Player {
         if (this.mesh.position.z > b.maxZ) this.mesh.position.z = b.maxZ;
     }
 
-    startSwing() {
+    // ctx may include: scene, Loot, pickRandomLootKey, addGold, lootInstances (array), enemies (array), updateEnemiesRemaining, updateWaveUI
+    startSwing(ctx = {}) {
         const currentTime = performance.now() / 1000;
         if (currentTime - this.lastSwingTime < this.swordCooldown) return;
 
@@ -82,16 +83,45 @@ export class Player {
         this.swinging = true;
         this.swingElapsed = 0;
 
-    // Damage enemies immediately. Read the canonical `baseDamage` value.
+        // Damage enemies immediately. Read the canonical `baseDamage` value.
     const dmg = Number.isFinite(this.baseDamage) ? this.baseDamage : 4;
-        this.enemies.forEach(e => {
+        for (let i = this.enemies.length - 1; i >= 0; i--) {
+            const e = this.enemies[i];
+            if (!e || !e.mesh) continue;
             const dx = e.mesh.position.x - this.mesh.position.x;
             const dz = e.mesh.position.z - this.mesh.position.z;
             const dist = Math.sqrt(dx*dx + dz*dz);
             if (dist <= this.swordRange) {
-                e.takeDamage(dmg);
+                const result = e.takeDamage(dmg);
+                if (result) {
+                    // If context provides handlers, use them to process rewards and loot.
+                    try {
+                        const coins = result.coins || 0;
+                        if (typeof ctx.addGold === 'function') ctx.addGold(coins);
+                        if (result.loot) {
+                            const lootId = result.loot.id || null;
+                            const pos = result.loot.pos || { x: e.mesh.position.x, y: e.mesh.position.y, z: e.mesh.position.z };
+                            const finalLootId = lootId || (typeof ctx.pickRandomLootKey === 'function' ? ctx.pickRandomLootKey() : null);
+                            if (ctx.scene && typeof ctx.Loot === 'function') {
+                                const li = new ctx.Loot(ctx.scene, finalLootId, pos, null);
+                                if (Array.isArray(ctx.lootInstances)) ctx.lootInstances.push(li);
+                            }
+                        }
+                        // Remove visual and from arrays
+                        if (ctx.scene && e.mesh) try { ctx.scene.remove(e.mesh); } catch (err) {}
+                        if (Array.isArray(ctx.enemies)) {
+                            const idx = ctx.enemies.indexOf(e);
+                            if (idx !== -1) ctx.enemies.splice(idx, 1);
+                        }
+                        if (typeof ctx.updateEnemiesRemaining === 'function') ctx.updateEnemiesRemaining();
+                        if (typeof ctx.updateWaveUI === 'function') ctx.updateWaveUI();
+                    } catch (err) {
+                        // swallow errors to avoid breaking swing flow
+                        console.warn('Error processing sword kill reward:', err);
+                    }
+                }
             }
-        });
+        }
     }
 
     update(delta) {

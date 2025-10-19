@@ -37,5 +37,5 @@ export const STARTING_GOLD = 100;
 
 // Player attack constants
 export const ATTACK_RANGE = 1.8; // world units
-export const ATTACK_DAMAGE = 4;
+export const ATTACK_DAMAGE = 3.5; // nerfed slightly from 4
 export const ATTACK_COOLDOWN = 600; // ms

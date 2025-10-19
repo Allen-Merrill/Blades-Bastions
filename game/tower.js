@@ -67,8 +67,8 @@ export class MageTower extends Tower {
       if (!e || !e.mesh) continue;
       const d = Math.hypot(e.mesh.position.x - this.mesh.position.x, e.mesh.position.z - this.mesh.position.z);
       if (d <= range) {
-  // Slightly higher base damage for mage
-  const dmg = 0.14 * ((this._modifiers && this._modifiers.damage) || 1);
+  // Slightly higher base damage for mage (buffed)
+  const dmg = 0.18 * ((this._modifiers && this._modifiers.damage) || 1);
         if (typeof e.takeDamage === 'function') {
           const res = e.takeDamage(dmg);
           if (res) e._deathResult = res;
