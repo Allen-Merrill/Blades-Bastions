@@ -835,13 +835,23 @@ startRoundBtn = document.getElementById('startRound');
 const endlessCheckbox = document.getElementById('endlessModeCheckbox');
 if (endlessCheckbox) {
   endlessMode = !!endlessCheckbox.checked;
-  endlessCheckbox.addEventListener('change', (e) => { endlessMode = !!e.target.checked; });
+  endlessCheckbox.addEventListener('change', (e) => { endlessMode = !!e.target.checked; refreshEndlessIndicator(); });
 }
 // show/hide endless indicator if present
 function refreshEndlessIndicator() {
   const el = document.getElementById('endlessIndicator');
   if (!el) return;
-  el.style.display = endlessMode ? 'inline' : 'none';
+  if (endlessMode) {
+    el.style.display = 'inline';
+    try {
+      // Explicit inline styles to ensure Chrome applies the reddish styling
+      el.style.color = '#ff3b30';
+      el.style.fontWeight = '800';
+      el.style.textShadow = '0 0 6px rgba(255,59,48,0.4)';
+    } catch (e) {}
+  } else {
+    el.style.display = 'none';
+  }
 }
 refreshEndlessIndicator();
 crosshairEl = document.getElementById('crosshair');
@@ -1340,7 +1350,7 @@ if (canvas) {
       // In first-person, perform player's melee swing; in top-down fall back to attemptAttack
       try {
         if (!usingTopDown && typeof player !== 'undefined' && player && typeof player.startSwing === 'function') {
-          player.startSwing();
+          player.startSwing({ scene, Loot, pickRandomLootKey, addGold, lootInstances, enemies, updateEnemiesRemaining, updateWaveUI });
           return;
         }
       } catch (err) {}

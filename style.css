@@ -7,14 +7,26 @@ body {
     position: absolute;
     top: 10px;
     left: 10px;
-    color: white;
+    color: #333333; /* dark grey for non-modal UI text */
     font-family: sans-serif;
     z-index: 10;
 }
 
+/* Make non-modal UI text more prominent */
+#ui, #upgradesPanel, #persistentUpgrades, .inventory-hud, .game-toast, #crosshair, #enemiesRemaining {
+    font-weight: 600;
+}
+
+/* Endless mode indicator should be reddish */
+#endlessIndicator {
+    color: #ff3b30 !important; /* stronger reddish, important to override inline or other rules */
+    font-weight: 800;
+    text-shadow: 0 0 6px rgba(255,59,48,0.4);
+}
+
 #enemiesRemaining {
     font-weight: bold;
-    color: #ffdddd;
+    color: #333333;
 }
 
 /* Wave progress bar */
@@ -50,7 +62,7 @@ body {
     left: 50%;
     top: 50%;
     transform: translate(-50%, -50%);
-    color: white;
+    color: #333333;
     font-size: 28px;
     z-index: 20;
     pointer-events: none;
@@ -69,7 +81,7 @@ canvas {
     top: 10px;
     width: 220px;
     background: rgba(0,0,0,0.6);
-    color: white;
+    color: #333333;
     padding: 8px;
     border-radius: 6px;
     z-index: 25;
@@ -84,7 +96,7 @@ canvas {
     top: 70px; /* below main UI */
     width: 280px;
     background: rgba(0,0,0,0.55);
-    color: #fff;
+    color: white; /* applied upgrades text should be white */
     padding: 8px;
     border-radius: 6px;
     z-index: 30;
@@ -143,7 +155,7 @@ canvas {
     right: 12px;
     bottom: 12px;
     background: rgba(0,0,0,0.45);
-    color: white;
+    color: white; /* inventory HUD text should be white */
     padding: 6px 8px;
     border-radius: 6px;
     font-size: 12px;
